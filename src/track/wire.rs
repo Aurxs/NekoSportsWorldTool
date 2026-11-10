@@ -258,7 +258,7 @@ pub(crate) fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>
 }
 
 /// 圈（每 1000m 一圈，末圈 isFullLap=false）。
-/// avgPace 按十进制分钟/公里写入（7.4.0 展示）；avgStride 单位厘米。
+/// 每公里数据：avgPace 单位秒/公里，avgStride 单位米/步。
 fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
     let mut laps = Vec::new();
     let locs = &track.locations;
@@ -289,8 +289,8 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
         let lap_steps = steps - prev_steps;
         laps.push(json!({
                 "avgCadence": if lap_t > 0 { json!(round_to(lap_steps as f64 / (lap_t as f64 / 60.0), 2)) } else { Value::Null },
-                "avgPace": if lap_t > 0 { json!(round_to(lap_t as f64 / 60.0 / (lap_d / 1000.0), 4)) } else { Value::Null },
-                "avgStride": if lap_steps > 0 { json!(round_to(lap_d / lap_steps as f64 * 100.0, 2)) } else { Value::Null },
+                "avgPace": if lap_t > 0 { json!(round_to(lap_t as f64 / (lap_d / 1000.0), 4)) } else { Value::Null },
+                "avgStride": if lap_steps > 0 { json!(round_to(lap_d / lap_steps as f64, 4)) } else { Value::Null },
                 "cumulativeDuration": t_now,
                 "distance": round_to(lap_d, 4),
                 "duration": lap_t,
@@ -394,12 +394,12 @@ mod regression_tests {
         let track = linear_track(1000.0, 600, 1200);
         let laps = build_laps(&track, 0);
         assert_eq!(laps.len(), 1);
-        assert_eq!(laps[0]["avgPace"], 10.0);
-        assert_eq!(laps[0]["avgStride"], 83.33);
+        assert_eq!(laps[0]["avgPace"], 600.0);
+        assert_eq!(laps[0]["avgStride"], 0.8333);
         assert_eq!(laps[0]["isFullLap"], true);
         let partial = build_laps(&linear_track(500.0, 300, 600), 0);
         assert_eq!(partial[0]["isFullLap"], false);
-        assert_eq!(partial[0]["avgPace"], 10.0);
+        assert_eq!(partial[0]["avgPace"], 600.0);
         assert!(build_laps(&linear_track(1000.0, 600, 0), 0)[0]["avgStride"].is_null());
         assert!(build_laps(&linear_track(0.0, 600, 0), 0).is_empty());
         let laps = build_laps(&linear_track(2500.0, 1500, 3000), 0);
@@ -433,14 +433,14 @@ mod regression_tests {
         );
     }
     #[test]
-    fn encoded_obs_lap_pace_uses_decimal_minutes() {
+    fn encoded_obs_lap_pace_uses_seconds_per_kilometre() {
         for (distance, seconds, pace) in [
-            (1000.0, 402, 6.7),
-            (1000.0, 401, 6.6833),
-            (1000.0, 408, 6.8),
-            (1000.0, 419, 6.9833),
-            (500.0, 204, 6.8),
-            (10.0, 9, 15.0),
+            (1000.0, 402, 402.0),
+            (1000.0, 401, 401.0),
+            (1000.0, 408, 408.0),
+            (1000.0, 419, 419.0),
+            (500.0, 204, 408.0),
+            (10.0, 9, 900.0),
         ] {
             let track = linear_track(distance, seconds, 1200);
             let obs = build_obs_object(&track, 1, "fixture", 1, "{}");
@@ -454,14 +454,39 @@ mod regression_tests {
         }
         // Crossing a kilometre boundary must not leak rounding into the total.
         let laps = build_laps(&linear_track(1010.0, 408, 1200), 0);
-        assert_eq!(laps[0]["avgPace"], 6.7333);
-        assert_eq!(laps[1]["avgPace"], 6.6667);
+        assert_eq!(laps[0]["avgPace"], 404.0);
+        assert_eq!(laps[1]["avgPace"], 400.0);
         assert_eq!(
             laps.iter()
                 .map(|l| l["duration"].as_i64().unwrap())
                 .sum::<i64>(),
             408
         );
+    }
+
+    #[test]
+    fn encoded_lap_units_match_kilometre_screenshot() {
+        let mut track = linear_track(2000.0, 789, 2359);
+        let mut midpoint = track.locations[0].clone();
+        midpoint.totalDis = 1000.0;
+        midpoint.totalTime = 395;
+        midpoint.steps = 1184;
+        track.locations.insert(1, midpoint);
+        crate::track::stats::rebuild(&mut track);
+
+        let obs = build_obs_object(&track, 1, "fixture", 1, "{}");
+        let laps = decode_json(&obs["laps_json"]);
+        for (lap, seconds, stride_m, cadence) in [
+            (&laps[0], 395, 0.8446, 179.85),
+            (&laps[1], 394, 0.8511, 178.93),
+        ] {
+            assert_eq!(lap["avgPace"], seconds as f64);
+            assert_eq!(lap["avgStride"], stride_m);
+            assert_eq!(lap["avgCadence"], cadence);
+            assert_eq!(lap["distance"], 1000.0);
+            assert_eq!(lap["duration"], seconds);
+        }
+        assert_eq!(laps[1]["cumulativeDuration"], 789);
     }
 
     #[test]
